@@ -268,18 +268,20 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         :return: 评论列表
         """
         result = []
+        root_count = 0
         comments_has_more = 1
         comments_cursor = 0
-        while comments_has_more and len(result) < max_count:
+        while comments_has_more and root_count < max_count:
             comments_res = await self.get_aweme_comments(aweme_id, comments_cursor)
             comments_has_more = comments_res.get("has_more", 0)
             comments_cursor = comments_res.get("cursor", 0)
             comments = comments_res.get("comments", [])
             if not comments:
                 continue
-            if len(result) + len(comments) > max_count:
-                comments = comments[:max_count - len(result)]
+            if root_count + len(comments) > max_count:
+                comments = comments[:max_count - root_count]
             result.extend(comments)
+            root_count += len(comments)
             if callback:  # If there is a callback function, execute the callback function
                 await callback(aweme_id, comments)
 
@@ -329,15 +331,24 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         }
         return await self.get(uri, params)
 
-    async def get_all_user_aweme_posts(self, sec_user_id: str, callback: Optional[Callable] = None):
+    async def get_all_user_aweme_posts(
+        self,
+        sec_user_id: str,
+        callback: Optional[Callable] = None,
+        max_count: Optional[int] = None,
+    ):
         posts_has_more = 1
         max_cursor = ""
         result = []
-        while posts_has_more == 1:
+        while posts_has_more == 1 and (max_count is None or len(result) < max_count):
             aweme_post_res = await self.get_user_aweme_posts(sec_user_id, max_cursor)
             posts_has_more = aweme_post_res.get("has_more", 0)
             max_cursor = aweme_post_res.get("max_cursor")
             aweme_list = aweme_post_res.get("aweme_list") if aweme_post_res.get("aweme_list") else []
+            if not aweme_list:
+                break
+            if max_count is not None:
+                aweme_list = aweme_list[: max_count - len(result)]
             utils.logger.info(f"[DouYinClient.get_all_user_aweme_posts] get sec_user_id:{sec_user_id} video len : {len(aweme_list)}")
             if callback:
                 await callback(aweme_list)
@@ -345,18 +356,34 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         return result
 
     async def get_aweme_media(self, url: str) -> Union[bytes, None]:
-        async with make_async_client(proxy=self.proxy) as client:
-            try:
-                response = await client.request("GET", url, timeout=self.timeout, follow_redirects=True)
-                response.raise_for_status()
-                if not response.reason_phrase == "OK":
-                    utils.logger.error(f"[DouYinClient.get_aweme_media] request {url} err, res:{response.text}")
-                    return None
-                else:
-                    return response.content
-            except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
-                utils.logger.error(f"[DouYinClient.get_aweme_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")  # Keep the original exception type name for developers to debug
-                return None
+        # Douyin CDN may close large image responses mid-stream. Retry each
+        # individual asset with a fresh client rather than leaving an incomplete
+        # gallery.
+        headers = {
+            "Referer": "https://www.douyin.com/",
+            "User-Agent": self.headers.get("User-Agent", "Mozilla/5.0"),
+            "Accept": "*/*",
+        }
+        for attempt in range(3):
+            async with make_async_client(proxy=self.proxy) as client:
+                try:
+                    response = await client.request(
+                        "GET", url, headers=headers, timeout=self.timeout, follow_redirects=True
+                    )
+                    response.raise_for_status()
+                    if response.reason_phrase == "OK":
+                        return response.content
+                    utils.logger.error(
+                        f"[DouYinClient.get_aweme_media] request {url} err, res:{response.text}"
+                    )
+                except httpx.HTTPError as exc:
+                    utils.logger.warning(
+                        f"[DouYinClient.get_aweme_media] attempt {attempt + 1}/3 "
+                        f"{exc.__class__.__name__} for {exc.request.url} - {exc}"
+                    )
+            if attempt < 2:
+                await asyncio.sleep(attempt + 1)
+        return None
 
     async def resolve_short_url(self, short_url: str) -> str:
         """

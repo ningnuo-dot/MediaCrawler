@@ -322,6 +322,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
             except KeyError as ex:
                 utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] have not fund note detail note_id:{note_id}, err: {ex}")
                 return None
+            except Exception as ex:
+                utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] Unexpected error note_id:{note_id}, err: {ex}")
+                return None
 
     async def batch_get_note_comments(self, note_list: List[str], xsec_tokens: List[str]):
         """Batch get note comments"""
@@ -400,6 +403,10 @@ class XiaoHongShuCrawler(AbstractCrawler):
     ) -> BrowserContext:
         """Launch browser and create browser context"""
         utils.logger.info("[XiaoHongShuCrawler.launch_browser] Begin create browser context ...")
+        # Prefer the Chrome already installed on Windows. This avoids requiring
+        # Playwright's separately downloaded Chromium runtime.
+        installed_chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        executable_options = {"executable_path": installed_chrome} if os.path.exists(installed_chrome) else {}
         if config.SAVE_LOGIN_STATE:
             # feat issue #14
             # we will save login state to avoid login every time
@@ -414,10 +421,11 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     "height": 1080
                 },
                 user_agent=user_agent,
+                **executable_options,
             )
             return browser_context
         else:
-            browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
+            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, **executable_options)  # type: ignore
             browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
             return browser_context
 

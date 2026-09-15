@@ -439,22 +439,14 @@ class DouYinCrawler(AbstractCrawler):
         if not note_download_url:
             return
         picNum = 0
-        for idx, url in enumerate(note_download_url):
+        for url in note_download_url:
             if not url:
                 continue
             content = await self.dy_client.get_aweme_media(url)
             await asyncio.sleep(random.random())
             if content is None:
                 continue
-            # 按真实字节魔数决定扩展名，避免 WebP/HEIC 被硬存成 .jpeg（2026-08-31 修复）
-            ext = "jpeg"
-            if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-                ext = "webp"
-            elif content[:4] == b"\x00\x00\x00\x18ftyp":
-                ext = "heic"
-            elif content[:4] == b"\x89PNG":
-                ext = "png"
-            extension_file_name = f"{picNum:>03d}.{ext}"
+            extension_file_name = f"{picNum:>03d}.jpeg"
             picNum += 1
             await douyin_store.update_dy_aweme_image(aweme_id, content, extension_file_name)
 

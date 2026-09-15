@@ -112,7 +112,13 @@ class ZhihuExtractor:
         res.content_text = extract_text_from_html(answer.get("content", ""))
         res.question_id = str(answer.get("question", {}).get("id") or "")
         res.content_url = f"{zhihu_constant.ZHIHU_URL}/question/{res.question_id}/answer/{res.content_id}"
-        res.title = extract_text_from_html(answer.get("title", ""))
+        # Zhihu answers do not have their own title. Use the title of the
+        # question the answer belongs to so downstream libraries can display
+        # a meaningful, stable heading.
+        res.title = extract_text_from_html(
+            answer.get("question", {}).get("title", "")
+            or answer.get("title", "")
+        )
         res.desc = extract_text_from_html(answer.get("description", "") or answer.get("excerpt", ""))
         res.created_time = answer.get("created_time")
         res.updated_time = answer.get("updated_time")

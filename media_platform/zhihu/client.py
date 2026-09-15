@@ -411,10 +411,21 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
         uri = f"/api/v4/members/{url_token}/answers"
         params = {
             "include":
-            "data[*].is_normal,admin_closed_comment,reward_info,is_collapsed,annotation_action,annotation_detail,collapse_reason,collapsed_by,suggest_edit,comment_count,can_comment,content,editable_content,attachment,voteup_count,reshipment_settings,comment_permission,created_time,updated_time,review_info,excerpt,paid_info,reaction_instruction,is_labeled,label_info,relationship.is_authorized,voting,is_author,is_thanked,is_nothelp;data[*].vessay_info;data[*].author.badge[?(type=best_answerer)].topics;data[*].author.vip_info;data[*].question.has_publishing_draft,relationship",
+            "data[*].is_normal,admin_closed_comment,reward_info,is_collapsed,annotation_action,annotation_detail,collapse_reason,collapsed_by,suggest_edit,comment_count,can_comment,content,editable_content,attachment,voteup_count,reshipment_settings,comment_permission,created_time,updated_time,review_info,excerpt,paid_info,reaction_instruction,is_labeled,label_info,relationship.is_authorized,voting,is_author,is_thanked,is_nothelp;data[*].vessay_info;data[*].author.badge[?(type=best_answerer)].topics;data[*].author.vip_info;data[*].question.title,has_publishing_draft,relationship",
             "offset": offset,
             "limit": limit,
             "order_by": "created"
+        }
+        return await self.get(uri, params)
+
+    async def get_question_answers(self, question_id: str, offset: int = 0, limit: int = 20) -> Dict:
+        """Get lightweight answer metadata for one question."""
+        uri = f"/api/v4/questions/{question_id}/answers"
+        params = {
+            "include": "data[*].id,type,comment_count,voteup_count,created_time,updated_time,excerpt;data[*].author.name,url_token;data[*].question.id,title",
+            "offset": offset,
+            "limit": limit,
+            "sort_by": "default",
         }
         return await self.get(uri, params)
 

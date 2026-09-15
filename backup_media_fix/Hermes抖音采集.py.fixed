@@ -1,0 +1,270 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""用 MediaCrawler 采集抖音链接，并按作品编号去重归档。"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import re
+import shutil
+import sys
+import time
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(r"D:\爬虫\MediaCrawler")
+OUT = Path(r"D:\AI视频\场景\采集暂存")
+BOOK = OUT.parent / "Hermes提取作品.xlsx"
+HEADERS = [
+    "是否选择","序号","作品id","作品类型","提取类型","搜索关键词","搜索话题","收藏夹名称",
+    "作品作者","作者粉丝数量","作品标题","合集名称","播放量","点赞量","评论量","收藏量",
+    "分享量","作品质量","作品时长","作品网址","发布时间","作者主页","是否全屏","是否购物车",
+    "有无本地生活","主页备注","合集备注","关键词备注","作品备注","作者uid","作者secUid","封面网址",
+    "购物车信息","商品ID","商品标题","本地生活信息展示","本地生活信息","DisableDownload",
+    "视频源网址","音频源网址","视频下载网址列表","图文下载网址","图文音乐下载网址","video_id",
+    "作品时长秒","话题内容","下载状态","保存路径","是否已经语音转写文案","是否会员作品"
+]
+
+def safe_name(text: str, limit: int = 90) -> str:
+    text = re.sub(r"[\r\n\t]+", " ", text or "无标题")
+    text = re.sub(r'[<>:"/\\|?*]', "_", text).strip(" .")
+    return (text or "无标题")[:limit].rstrip(" .")
+
+def resolve_id(url: str) -> str:
+    m = re.search(r"(?:video|note|slides)/(\d{10,})|modal_id=(\d{10,})", url)
+    if m:
+        return next(x for x in m.groups() if x)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=20) as r:
+            final = r.geturl()
+        m = re.search(r"(?:video|note)/(\d{10,})|modal_id=(\d{10,})", final)
+        if m:
+            return next(x for x in m.groups() if x)
+    except Exception:
+        pass
+    return ""
+
+def existing_rows():
+    if not BOOK.exists():
+        return {}, None
+    from openpyxl import load_workbook
+    wb = load_workbook(BOOK)
+    ws = wb["作品列表"]
+    pos = {str(ws.cell(1, c).value): c for c in range(1, ws.max_column + 1)}
+    rows = {}
+    id_col = pos.get("作品id", 3)
+    for r in range(2, ws.max_row + 1):
+        val = ws.cell(r, id_col).value
+        if val:
+            rows[str(val)] = r
+    return rows, wb
+
+def valid_existing(row_num: int, wb) -> bool:
+    ws = wb["作品列表"]
+    pos = {str(ws.cell(1, c).value): c for c in range(1, ws.max_column + 1)}
+    p = ws.cell(row_num, pos["保存路径"]).value
+    if not p:
+        return False
+    path = Path(str(p))
+    if path.is_file():
+        return path.stat().st_size > 1024
+    if path.is_dir():
+        return any(x.is_file() and x.stat().st_size > 1024 for x in path.iterdir())
+    return False
+
+def run_crawler(urls, stage: Path):
+    sys.path.insert(0, str(ROOT))
+    import config
+    from media_platform.douyin.core import DouYinCrawler
+    config.PLATFORM = "dy"
+    config.CRAWLER_TYPE = "detail"
+    config.LOGIN_TYPE = "qrcode"
+    config.DY_SPECIFIED_ID_LIST = list(urls)
+    config.ENABLE_GET_MEIDAS = True
+    config.ENABLE_GET_COMMENTS = False
+    config.ENABLE_GET_SUB_COMMENTS = False
+    config.SAVE_DATA_OPTION = "jsonl"
+    config.SAVE_DATA_PATH = str(stage)
+    config.HEADLESS = False
+    config.SAVE_LOGIN_STATE = True
+    async def go():
+        crawler = DouYinCrawler()
+        try:
+            await crawler.start()
+        finally:
+            if getattr(crawler, "browser_context", None):
+                try:
+                    await crawler.close()
+                except Exception as exc:
+                    # MediaCrawler may already close the browser at the end of
+                    # a successful run; that must not discard downloaded files.
+                    if "closed" not in str(exc).lower():
+                        raise
+    asyncio.run(go())
+
+def load_stage_records(stage: Path):
+    records = {}
+    for p in stage.glob("douyin/jsonl/*.jsonl"):
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            d = json.loads(line)
+            records[str(d.get("aweme_id", ""))] = d
+    return records
+
+def make_row(d, save_path: Path, kind: str):
+    aid = str(d.get("aweme_id", ""))
+    ts = d.get("create_time")
+    try:
+        published = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        published = str(ts or "")
+    title = d.get("title") or d.get("desc") or "无标题"
+    topics = ",".join(re.findall(r"#([^#\s]+)", title))
+    notes = d.get("note_download_url") or []
+    if isinstance(notes, str):
+        try: notes = json.loads(notes)
+        except Exception: notes = [notes] if notes else []
+    values = {
+        "是否选择": True, "作品id": aid, "作品类型": kind, "提取类型": "链接",
+        "作品作者": d.get("nickname", ""), "作品标题": title, "播放量": 0,
+        "点赞量": d.get("liked_count", 0), "评论量": d.get("comment_count", 0),
+        "收藏量": d.get("collected_count", 0), "分享量": d.get("share_count", 0),
+        "作品网址": d.get("aweme_url") or f"https://www.douyin.com/video/{aid}",
+        "发布时间": published, "是否全屏": "否", "是否购物车": "无", "有无本地生活": "无",
+        "主页备注": "默认", "合集备注": "默认", "关键词备注": "默认", "作品备注": "默认",
+        "封面网址": d.get("cover_url", ""), "DisableDownload": False,
+        "视频源网址": d.get("video_download_url", ""), "音频源网址": d.get("music_download_url", ""),
+        "视频下载网址列表": d.get("video_download_url", ""),
+        "图文下载网址": json.dumps(notes, ensure_ascii=False),
+        "图文音乐下载网址": d.get("music_download_url", ""), "video_id": aid,
+        "话题内容": topics, "下载状态": "成功", "保存路径": str(save_path),
+        "是否已经语音转写文案": False, "是否会员作品": False,
+    }
+    return [values.get(h, "") for h in HEADERS]
+
+def save_workbook(items):
+    # 隐藏属性会让 openpyxl 写入报 PermissionError（Windows），先取消、写后恢复
+    import ctypes
+    FILE_ATTRIBUTE_HIDDEN = 0x2
+    was_hidden = False
+    if BOOK.exists():
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(str(BOOK))
+        was_hidden = bool(attrs & FILE_ATTRIBUTE_HIDDEN)
+        if was_hidden:
+            ctypes.windll.kernel32.SetFileAttributesW(str(BOOK), 0x80)
+    try:
+        from openpyxl import Workbook, load_workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+        if BOOK.exists():
+            wb = load_workbook(BOOK)
+            ws = wb["作品列表"]
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "作品列表"
+            ws.append(HEADERS)
+        pos = {str(ws.cell(1, c).value): c for c in range(1, ws.max_column + 1)}
+        existing = {str(ws.cell(r, pos["作品id"]).value): r for r in range(2, ws.max_row + 1) if ws.cell(r, pos["作品id"]).value}
+        for aid, row in items:
+            if aid in existing:
+                r = existing[aid]
+                for c, v in enumerate(row, 1): ws.cell(r, c, v)
+            else:
+                ws.append(row)
+                ws.cell(ws.max_row, pos["序号"], ws.max_row - 1)
+        for r in range(2, ws.max_row + 1): ws.cell(r, pos["序号"], r - 1)
+        fill = PatternFill("solid", fgColor="1F4E78")
+        for cell in ws[1]:
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.fill = fill
+            cell.alignment = Alignment(horizontal="center")
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        widths = {"A":10,"B":8,"C":22,"D":10,"I":18,"K":48,"T":42,"U":20,"AV":65}
+        for col, width in widths.items(): ws.column_dimensions[col].width = width
+        ws.row_dimensions[1].height = 28
+        wb.save(BOOK)
+    finally:
+        if was_hidden:
+            ctypes.windll.kernel32.SetFileAttributesW(str(BOOK), FILE_ATTRIBUTE_HIDDEN)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("urls", nargs="+")
+    ap.add_argument("--force", action="store_true", help="重新下载并更新已有记录")
+    args = ap.parse_args()
+    OUT.mkdir(parents=True, exist_ok=True)
+    known, wb = existing_rows()
+    todo, skipped = [], []
+    for url in args.urls:
+        aid = resolve_id(url)
+        if aid and aid in known and not args.force and valid_existing(known[aid], wb):
+            skipped.append(aid)
+        else:
+            todo.append(url)
+    if not todo:
+        print(json.dumps({"ok": True, "downloaded": 0, "skipped_duplicate": skipped}, ensure_ascii=False))
+        return
+    stage = OUT / ".staging" / str(int(time.time()))
+    stage.mkdir(parents=True, exist_ok=True)
+    completed = []
+    try:
+        run_crawler(todo, stage)
+        records = load_stage_records(stage)
+        rows = []
+        for aid, d in records.items():
+            title = safe_name(d.get("title") or d.get("desc") or "无标题")
+            note_urls = d.get("note_download_url") or []
+            is_note = bool(note_urls)
+            if is_note:
+                src = stage / "douyin" / "images" / aid
+                dst = OUT / "图文作品" / f"{title}_{aid}"
+                # MediaCrawler stores note URLs as one or more comma-joined
+                # strings. Count URL occurrences to obtain the expected asset
+                # count, then validate the staging set before replacing an old
+                # successful folder.
+                url_parts = note_urls if isinstance(note_urls, list) else [note_urls]
+                expected = sum(str(part).count("http") for part in url_parts)
+                # Live 图会额外产出 <序号>_live.mp4（内嵌动态短视频），
+                # 统计图片数时排除 mp4，只数静态帧（2026-08-31）
+                stage_files = (
+                    [x for x in src.iterdir() if x.is_file() and x.suffix.lower() != ".mp4" and x.stat().st_size > 1024]
+                    if src.exists() else []
+                )
+                valid = bool(stage_files) and (expected == 0 or len(stage_files) == expected)
+                if valid:
+                    if args.force:
+                        for old in ((OUT / "图文作品").glob(f"*_{aid}") if (OUT / "图文作品").exists() else []):
+                            if old.is_dir(): shutil.rmtree(old)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if dst.exists(): shutil.rmtree(dst)
+                    shutil.move(str(src), str(dst))
+                kind = "图文"
+            else:
+                src = stage / "douyin" / "videos" / aid / "video.mp4"
+                dst = OUT / f"{title}_{aid}.mp4"
+                valid = src.exists() and src.stat().st_size > 1024
+                if valid:
+                    if args.force:
+                        for old in OUT.glob(f"*_{aid}.mp4"):
+                            old.unlink()
+                    if dst.exists(): dst.unlink()
+                    shutil.move(str(src), str(dst))
+                kind = "视频"
+            if valid:
+                rows.append((aid, make_row(d, dst, kind)))
+                completed.append({"id": aid, "type": kind, "path": str(dst), "bytes": dst.stat().st_size if dst.is_file() else sum(x.stat().st_size for x in dst.iterdir() if x.is_file())})
+        if rows: save_workbook(rows)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    print(json.dumps({"ok": len(completed)==len(todo), "requested": len(todo), "downloaded": completed, "skipped_duplicate": skipped, "workbook": str(BOOK)}, ensure_ascii=False))
+    if len(completed) != len(todo): raise SystemExit(2)
+
+if __name__ == "__main__":
+    main()

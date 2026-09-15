@@ -400,6 +400,8 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 config.TIEBA_CREATOR_URL_LIST = [
                     _normalize_tieba_creator_url(item) for item in creator_id_list
                 ]
+            elif platform == PlatformEnum.ZHIHU:
+                config.ZHIHU_CREATOR_URL_LIST = creator_id_list
 
         return SimpleNamespace(
             platform=config.PLATFORM,

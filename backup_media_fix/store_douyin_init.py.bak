@@ -69,18 +69,8 @@ def _extract_note_image_list(aweme_detail: Dict) -> List[str]:
 
     for image in images:
         image_url_list = image.get("url_list", [])  # download_url_list has watermarked images, url_list has non-watermarked images
-        if not image_url_list:
-            continue
-        # 优先选 jpeg（非水印、格式明确），避免 url_list 末尾是 webp 时下载
-        # WebP 却按 .jpeg 归档导致格式错乱/预览异常（2026-08-31 修复）
-        picked = None
-        for u in reversed(image_url_list):
-            if ".jpeg" in u or ".jpg" in u or "q75.jpeg" in u:
-                picked = u
-                break
-        if picked is None:
-            picked = image_url_list[-1]
-        images_res.append(picked)
+        if image_url_list:
+            images_res.append(image_url_list[-1])
 
     return images_res
 
